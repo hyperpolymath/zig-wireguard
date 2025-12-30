@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+= zig-wireguard
+:toc:
+
+image:https://img.shields.io/badge/RSR-Bronze-cd7f32[RSR Bronze]
+image:https://img.shields.io/badge/Language-Zig-f7a41d[Zig]
+
+Zig FFI bindings to libwireguard for VPN tunnel management.
+
+== Goal
+
+Provide **idiomatic Zig bindings** to WireGuard that:
+
+1. Work on Linux, macOS, FreeBSD, Windows
+2. Replace shell calls to `wg` and `wg-quick`
+3. Enable SDP (Software-Defined Perimeter) integration
+4. Support cicada post-quantum key import
+
+== Methodology
+
+=== Why FFI, Not Pure Zig?
+
+WireGuard is **kernel-level** on Linux/FreeBSD and requires:
+
+* Netlink socket communication (Linux)
+* Network extension APIs (macOS)
+* TUN/TAP driver interaction (Windows)
+
+Reimplementing this in pure Zig would be:
+- 10,000+ lines of code
+- Years of security auditing
+- Duplicating tested, audited code
+
+**FFI approach**: ~500 lines, leverage battle-tested libwireguard.
+
+=== Zig FFI Advantages Over C FFI
+
+[cols="1,2"]
+|===
+|Feature |Benefit
+
+|`@cImport` |Direct header import, no manual bindings
+|Compile-time safety |Catch type mismatches at build
+|Allocator control |No hidden malloc, explicit memory
+|Error unions |Convert C error codes to Zig errors
+|Cross-compilation |Single build for all targets
+|===
+
+== Implementation
+
+=== Architecture
+
+[source]
+----
+┌─────────────────────────────────────────┐
+│           zig-wireguard                 │
+│         (idiomatic Zig API)             │
+├─────────────────────────────────────────┤
+│  src/wireguard.zig                      │
+│  - Device management                    │
+│  - Peer configuration                   │
+│  - Key handling (x25519 + cicada PQ)    │
+│  - Tunnel up/down                       │
+├─────────────────────────────────────────┤
+│  src/c.zig (@cImport)                   │
+│  - Raw libwireguard bindings            │
+│  - Platform-specific ifdefs             │
+└─────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────┐
+│        libwireguard (C)                 │
+│  - Linux: netlink + kernel module       │
+│  - macOS: Network.framework             │
+│  - Windows: Wintun driver               │
+│  - FreeBSD: if_wg kernel module         │
+└─────────────────────────────────────────┘
+----
+
+=== Directory Structure
+
+[source]
+----
+zig-wireguard/
+├── src/
+│   ├── main.zig          # Library root
+│   ├── c.zig             # @cImport bindings
+│   ├── device.zig        # wg_device wrapper
+│   ├── peer.zig          # wg_peer wrapper
+│   ├── key.zig           # Key generation/import
+│   └── platform/
+│       ├── linux.zig     # Netlink specifics
+│       ├── macos.zig     # Network.framework
+│       ├── windows.zig   # Wintun
+│       └── freebsd.zig   # if_wg
+├── build.zig
+├── build.zig.zon
+└── examples/
+    ├── tunnel.zig        # Basic tunnel setup
+    └── sdp.zig           # SDP integration
+----
+
+=== API Design
+
+[source,zig]
+----
+const wg = @import("zig-wireguard");
+
+pub fn main() !void {
+    // Create device
+    var device = try wg.Device.create("wg0");
+    defer device.destroy();
+
+    // Set private key (supports cicada PQ hybrid)
+    try device.setPrivateKey(key_bytes);
+
+    // Add peer
+    var peer = try device.addPeer(.{
+        .public_key = peer_pubkey,
+        .endpoint = try std.net.Address.parseIp4("1.2.3.4", 51820),
+        .allowed_ips = &.{
+            .{ .addr = .{ 10, 0, 0, 0 }, .cidr = 24 },
+        },
+        .persistent_keepalive = 25,
+    });
+
+    // Bring up tunnel
+    try device.up();
+    defer device.down();
+
+    // ... use tunnel ...
+}
+----
+
+=== cicada Integration
+
+[source,zig]
+----
+const wg = @import("zig-wireguard");
+const cicada = @import("zig-cicada");
+
+// Import post-quantum hybrid key from cicada
+const pq_key = try cicada.loadKey("cloud-sync");
+const wg_key = try wg.Key.fromCicadaHybrid(pq_key);
+
+try device.setPrivateKey(wg_key);
+----
+
+== Platform Support
+
+[cols="1,1,2"]
+|===
+|Platform |Status |Notes
+
+|Linux |✓ Full |Kernel module + netlink
+|macOS |✓ Full |Network.framework (10.15+)
+|FreeBSD |✓ Full |if_wg kernel module
+|Windows |✓ Full |Wintun driver required
+|Android |Planned |NDK + WireGuard app
+|iOS |Planned |Network Extension
+|===
+
+== Dependencies
+
+[source,zig]
+----
+// build.zig.zon
+.dependencies = .{
+    .libwireguard = .{
+        .url = "https://git.zx2c4.com/wireguard-tools/snapshot/wireguard-tools-1.0.20210914.tar.xz",
+    },
+},
+----
+
+== License
+
+AGPL-3.0-or-later
